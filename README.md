@@ -24,6 +24,7 @@ training loop, no sensor is required for the system to work.
 ## Table of Contents
 
 - [In 3 Points](#in-3-points)
+- [Why Fusion?](#why-fusion)
 - [Who Is This For](#who-is-this-for)
 - [What You Need](#what-you-need)
 - [Quick Start](#quick-start-10-minutes)
@@ -40,7 +41,9 @@ training loop, no sensor is required for the system to work.
 - [Roadmap](#roadmap)
 - [FAQ](#faq)
 - [Related Projects](#related-projects)
+- [Development History](#development-history)
 - [Acknowledgments](#acknowledgments)
+- [Contributing](#contributing)
 - [License](#license)
 
 ---
@@ -58,6 +61,27 @@ training loop, no sensor is required for the system to work.
    SQLite so you can replay it offline. Two analysis scripts
    (`deep_analysis.py`, `optimize_weights.py`) turn that log into data-driven
    weight tuning — no guesswork about how much each sensor should count.
+
+---
+
+## Why Fusion?
+
+|                              | Radar only (LD2412/LD2450) | WiFi CSI only | Home-Assistant-only (PIR/MW) | **All fused (this project)** |
+|------------------------------|:---:|:---:|:---:|:---:|
+| **Walking person**           | Excellent | Good | Good | **Excellent (confirmed by multiple physics)** |
+| **Stationary person**        | Weak (static energy decays) | Good (breathing) | Good (MW) / Weak (PIR) | **Strong (breathing + MW agree)** |
+| **Through thin walls**       | Yes (24 GHz) | Yes (2.4 GHz) | No | Yes |
+| **HVAC / draft false trigger** | Radar ghosting common | CSI can see it | PIR fires on air movement | **Lower — cross-validation vetos outliers** |
+| **Tamper / spoof resistance**| Single sensor shielded = blind | WiFi jam = blind | Cover MW sensor = blind | **Harder — need to defeat all physics classes** |
+| **Cost**                     | $4–8 | $3–5 per node | $15–25 (MW) | Sum of inputs |
+| **Failure mode**             | Silent wrong answer | Silent drift | Stuck "on" (HA reports stale) | **Degrades gracefully — bad sensor voted out** |
+| **Typical recall**           | 0.70–0.85 | 0.55–0.75 | 0.60–0.90 (MW), 0.30–0.50 (PIR) | **0.95+ after tuning** |
+| **Typical precision**        | 0.85–0.95 | 0.80–0.95 | 0.90–0.98 (MW) | **0.95+** |
+
+The weights aren't hand-picked — they fall out of a logistic regression on
+the service's own `sensor_snapshots` log. In our deployment, LD2412 came out
+as the dominant sensor (weight ~0.50) and PIR came out near zero. Your own
+numbers will differ; that's why the tool ships with the service.
 
 ---
 
@@ -355,6 +379,52 @@ Two mechanisms kill oscillation:
    (auto-discovery)
 ```
 
+### Repository layout
+
+```
+multi-sensor-fusion/
+├── fusion_service.py              # Main service (~2900 LOC, single file by design)
+│   ├── FusionDatabase             # SQLite layer + rotation / VACUUM
+│   ├── FusionManager              # per-pair state, scoring, FSM
+│   ├── LD2412Frame / LD2450Frame  # MQTT payload dataclasses
+│   ├── CSIFrame                   # ESPectre payload dataclass
+│   ├── SensorSnapshotWriter       # per-cycle snapshot persistence
+│   ├── HAPoller                   # Home Assistant REST polling
+│   ├── TapoCameraController       # Non-blocking Tapo PTZ preset driver
+│   ├── TelegramNotifier           # Async Telegram bot client
+│   └── AutoDiscoverySubscriber    # ESPHome `discover/#` handler
+├── config.yaml.template           # Annotated configuration reference
+├── install.py                     # Interactive installer (venv + systemd)
+├── docker-compose.yml             # Docker Compose deployment
+├── Dockerfile                     # Python 3.12-slim base
+├── fusion-service.service         # systemd unit for bare-metal install
+├── requirements.txt               # Runtime Python dependencies
+├── .env.example                   # Env var template (secrets go here)
+├── .gitignore                     # Excludes data/, config.yaml, .env
+├── tools/
+│   ├── deep_analysis.py           # Comprehensive per-pair analysis + plots
+│   ├── optimize_weights.py        # Logistic regression + grid search tuning
+│   └── analyze_weights.py         # Legacy analysis (kept for reproducibility)
+├── docs/                          # (future) diagrams, notes
+├── pictures/                      # (future) screenshots for README
+├── CHANGELOG.md                   # Version history (Keep a Changelog format)
+├── LICENSE                        # MIT
+└── README.md                      # This file
+```
+
+Runtime files (gitignored, created on first run):
+
+```
+├── config.yaml                    # Your actual config — copy from .template
+├── .env                           # Your secrets — copy from .env.example
+├── data/
+│   ├── fusion.db                  # SQLite store (rotated above max_size_mb)
+│   ├── fusion.db-shm              # SQLite WAL shared memory
+│   └── fusion.db-wal              # SQLite write-ahead log
+└── calibration/
+    └── thresholds.json            # Live per-node CSI auto-calibration
+```
+
 ---
 
 ## Configuration Reference
@@ -602,47 +672,42 @@ are symptoms to watch for, not hard rules.
 
 ## Troubleshooting
 
-### Service starts but nothing is detected
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Service starts but no `FUSION [<pair>] DETECTED ...` in logs | MQTT not connecting | Verify `mqtt.host`/`port`, credentials (`MQTT_USER`/`MQTT_PASSWORD`), firewall. Logs should show `MQTT connected to ...`. |
+| Only some pairs emit detections | Subscribed topic name mismatch | Run `mosquitto_sub -h <broker> -t '#' -v`; confirm your `ld2412_<pair>` / `ld2450_<pair>` / `csi_<pair>` IDs match what the firmware publishes. |
+| `Offline sensors: <name>: 60m` warning | Feed went silent | Check the sensor node's own logs. Fusion excludes feeds that go quiet; it re-includes them automatically when they return. |
+| `DB size … > limit … MB, cleaning up …` then silence | Pre-v1.0.0 cleanup bug | Upgrade to v1.0.0+. Root cause: DELETE loop without `rowcount=0` break + `sensor_snapshots` missing from prune list — see CHANGELOG. |
+| Rapid PRESENT↔CLEARING oscillation | `exit_threshold` too close to `confidence_threshold`, or `min_present_s` too low | Widen the hysteresis gap (lower `exit_threshold`) and/or raise `min_present_s`. Run `deep_analysis.py` to identify the flaky sensor. |
+| HA entities listed under `ground_truth_sensors` don't affect fusion score | Missing `fusion_inputs: true` flag | Set `fusion_inputs: true` on the entries you want fed into scoring. Without it they're ground-truth only (for analysis). |
+| Telegram silent / returns 400 | Missing or wrong `TELEGRAM_TOKEN` / `TELEGRAM_CHAT_ID` | Verify both env vars. Test with `curl https://api.telegram.org/bot<TOKEN>/getMe`. `cooldown_s: 0` disables throttling during testing. |
+| CSI thresholds keep drifting | Radio-hostile spot (metal, microwave, crowded 2.4 GHz) | Move node, or lock the threshold manually in `thresholds.json` after a known-good calibration and disable auto-recalc for that node. |
+| `VACUUM failed: cannot VACUUM from within a transaction` | Pre-v1.0.0 fix missed | Upgrade to v1.0.0+. VACUUM now runs in autocommit (`isolation_level=None`). |
+| High CPU with no output | Cleanup loop stuck (pre-v1.0.0) | Upgrade. Diagnostic: `docker stats fusion-service` — 100% CPU with 0 KB net I/O is the signature. |
+| ImportError on `install.py` | Wrong Python version | Python 3.10+ required (`match`, dict `|` operators used throughout). |
+| Home Assistant binary_sensor never appears | HA MQTT discovery disabled, or different prefix | Confirm HA's MQTT integration uses default `homeassistant/` prefix. Use HA's MQTT integration UI → "Configure" → "Enable discovery". |
 
-1. Check MQTT is connected: logs should contain `MQTT connected to …`.
-2. Check sensors are publishing: `mosquitto_sub -h <broker> -t '#' -v` and
-   look for your configured `ld2412_<pair>`, `ld2450_<pair>`,
-   `csi_<pair>` topics.
-3. If a CSI node is listed as "offline" after 60 min, inspect its own logs
-   — the fusion service blacklists feeds that go silent.
+### Useful one-liners
 
-### "DB size … > limit … MB, cleaning up…" then nothing happens
+```bash
+# Watch fusion decisions live
+docker logs -f fusion-service | grep FUSION
 
-Fixed in current release. If you're on an older build, the cleanup loop
-could hang if `events`/`ha_ground_truth` were empty but `sensor_snapshots`
-was full — DELETE returned 0 rows but the loop didn't exit because file
-size only shrinks after VACUUM. Upgrade to v1.0.0+.
+# Dump the last hour of events from SQLite
+sqlite3 -readonly data/fusion.db \
+  "SELECT datetime(timestamp,'unixepoch','localtime'), pair_name, event_type, confidence, source
+   FROM events
+   WHERE timestamp > strftime('%s','now','-1 hour')
+   ORDER BY timestamp DESC LIMIT 50;"
 
-### High ping-pong / oscillation
+# Quick-check which sensors were seen in the last 5 min
+sqlite3 -readonly data/fusion.db \
+  "SELECT node_id, datetime(MAX(timestamp_hour),'unixepoch','localtime')
+   FROM csi_stats_hourly GROUP BY node_id;"
 
-Increase `min_present_s` and/or `clearing_s` for the affected pair. Start
-with doubling whichever is smaller, then re-check after an hour. If that
-doesn't help, run `deep_analysis.py` to find which sensor is causing the
-confidence dips that trigger the oscillation.
-
-### Home Assistant sensors show up in `ground_truth_sensors` but fusion ignores them
-
-Set `fusion_inputs: true` on the entries you want fed into scoring.
-Without that flag they're logged for analysis but not consumed by fusion.
-
-### Telegram says nothing / fails to send
-
-Check `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` are set. The `cooldown_s` key
-throttles messages by default (30 s) to avoid rate-limiting — set it to 0
-to disable throttling for testing.
-
-### CSI node keeps calibrating and thresholds drift
-
-Expected for the first few hours after deployment. Thereafter, the
-`threshold` value in `calibration/thresholds.json` should stabilize. Large
-drift after stabilization usually means the node is in a radio-hostile
-spot (metal reflections, microwave oven nearby, neighbor's 2.4 GHz AP
-overlapping channel).
+# Force recalibration of a CSI node (restart the service)
+docker compose restart fusion
+```
 
 ---
 
@@ -686,24 +751,128 @@ went wrong.
 
 ## Related Projects
 
-- **[HLK-LD2412-security](https://github.com/PeterkoCZ91/HLK-LD2412-security)** — the sensor node firmware this service fuses
-- **[HLK-LD2412-POE-security](https://github.com/PeterkoCZ91/HLK-LD2412-POE-security)** — PoE variant of the LD2412 node
-- **[HLK-LD2450-security](https://github.com/PeterkoCZ91/HLK-LD2450-security)** — LD2450 2D-radar node
-- **[HLK-LD2412-POE-WiFi-CSI-security](https://github.com/PeterkoCZ91/HLK-LD2412-POE-WiFi-CSI-security)** — combined PoE LD2412 + CSI in one firmware
-- **[espectre](https://github.com/PeterkoCZ91/espectre)** — WiFi CSI motion-detection firmware (fork)
+Fusion consumes feeds from these sensor-node firmware projects. All are MIT
+or GPL-3.0 licensed and self-contained — you only need the ones matching
+the hardware you actually own.
+
+| Repo | Hardware | Network | License | Role in fusion |
+|------|----------|---------|:-------:|----------------|
+| [HLK-LD2412-security](https://github.com/PeterkoCZ91/HLK-LD2412-security) | ESP32 + HLK-LD2412 | WiFi | MIT | Dominant sensor (1D radar) |
+| [HLK-LD2412-POE-security](https://github.com/PeterkoCZ91/HLK-LD2412-POE-security) | ESP32 + LAN8720A + LD2412 | PoE/Ethernet | MIT | Dominant sensor (wired) |
+| [HLK-LD2450-security](https://github.com/PeterkoCZ91/HLK-LD2450-security) | ESP32 + HLK-LD2450 | WiFi | MIT | 2D radar, zone localization |
+| [HLK-LD2412-POE-WiFi-CSI-security](https://github.com/PeterkoCZ91/HLK-LD2412-POE-WiFi-CSI-security) | ESP32-PoE + LD2412 + CSI | PoE + WiFi (CSI-only) | GPL-3.0 | Dual-sensor node (both radar and CSI in one board) |
+| [espectre](https://github.com/PeterkoCZ91/espectre) | ESP32 (any) | WiFi | GPL-3.0 | Standalone CSI node |
+
+Any combination of these (or none — just HA sensors) produces a valid
+fusion deployment. Start with whichever hardware you already have.
+
+---
+
+## Development History
+
+Released milestones (detail in [CHANGELOG.md](CHANGELOG.md)):
+
+| Version | Highlights |
+|---------|-----------|
+| v1.0.0 | Initial public release: weighted-average fusion, FSM with hysteresis, anti-pingpong, cross-validation bonus, optional sensors, auto-discovery, HA REST polling, MQTT HA discovery, Tapo PTZ, Telegram notifications, SQLite logging with safe DB rotation, offline analysis tools |
+
+Pre-release internal development (no tagged builds):
+
+| Phase | Highlights |
+|-------|-----------|
+| Phase 1 | Initial 3-sensor fusion (LD2412 + LD2450 + single CSI) with additive scoring |
+| Phase 2 | HA integration: REST polling, stuck-sensor filter, HA discovery output |
+| Phase 3 | CSI rewrite: dropped `anomaly_ratio`, adopted on-chip `composite_score`, added `breathing_score`, dual-CSI zone inference |
+| Phase 4 | Weighted-average rewrite: data-derived weights from logistic regression, cross-validation bonus, lowered thresholds, exit-threshold hysteresis |
+| Phase 5 | Anti-pingpong: `min_present_s`, continuity bonus, FSM state machine formalized |
+| Phase 6 | Public release hardening: DB cleanup fix, VACUUM autocommit, full docs, scrubbed secrets |
 
 ---
 
 ## Acknowledgments
 
-- **ESPectre** (Francesco Pace) — the WiFi-CSI foundation this project's
-  CSI pipeline is built on.
-- **Home Assistant** — reference sensors, discovery protocol, and the
-  ecosystem that makes this useful.
-- The **Hi-Link** team for the LD2412 / LD2450 radar modules.
+- **[Francesco Pace](https://github.com/francescopace)** —
+  [ESPectre](https://github.com/francescopace/espectre) WiFi CSI motion
+  detection (GPLv3). The CSI side of this fusion is built on ESPectre's
+  on-chip composite score; the service just consumes its MQTT output.
+- **[Home Assistant](https://www.home-assistant.io/)** — reference sensors,
+  MQTT discovery protocol, long-lived access token support, and the
+  ecosystem that makes this service useful.
+- **[Hi-Link](https://www.hlktech.net/)** — HLK-LD2412 and HLK-LD2450
+  mmWave radar modules, and the community-reverse-engineered UART
+  protocol.
+- **[Eclipse Paho / Mosquitto](https://mosquitto.org/)** — the MQTT broker
+  and client library this service depends on.
+- **[Tasmota / Staars](https://github.com/Staars)** — community LD2412
+  protocol research that the upstream firmware projects build on.
+- **[SA-WiSense](https://github.com/)** — inspiration for the ratio-
+  turbulence CSI feature.
+
+---
+
+## Contributing
+
+Contributions are welcome — especially:
+
+- **Weight-tuning reports** for different hardware mixes (we genuinely
+  want to know what the regression spits out on non-Sonoff MW sensors, on
+  Frigate+camera setups, on Zigbee PIR, etc.).
+- **Firmware-quirk notes** for LD2412 / LD2450 versions we haven't seen.
+- **New fusion inputs** — any binary sensor behind HA can already be
+  wired in via `ground_truth_sensors` + `fusion_inputs: true`, but native
+  support for Zigbee2MQTT / Z-Wave JS is on the roadmap and welcome.
+- **Bug reports** with: your `config.yaml` (secrets redacted!), a few
+  lines of log output, and, if possible, a dump of the offending rows
+  from `sensor_snapshots` (SQLite `.dump` is fine).
+
+### Workflow
+
+1. Fork the repository on GitHub.
+2. Create a feature branch (`git checkout -b feat/my-feature`).
+3. Make your changes and add a line to `CHANGELOG.md` under an
+   `[Unreleased]` heading.
+4. Run a smoke test (`python3 -c "import fusion_service"` must succeed,
+   and the service should start cleanly against a real broker).
+5. Commit with a clear imperative message (`feat: ...`, `fix: ...`,
+   `docs: ...`, `refactor: ...`).
+6. Push to the branch and open a Pull Request against `master`.
+
+### Coding conventions
+
+- Python 3.10+. Use `match` statements and dict-merge operators where
+  they improve readability.
+- Type hints on public methods and dataclasses. Keep internal helpers
+  pragmatic — not every `_tmp` variable needs one.
+- Single-file `fusion_service.py` is deliberate. Resist the urge to split
+  until the file crosses ~3500 LOC *and* a clear logical boundary
+  emerges. New classes go at the bottom of their topical section.
+- Keep `__init__` methods short. Long setup goes in `_configure_*`
+  helpers.
+- Log sparingly at INFO (one line per fusion cycle max), loudly at
+  WARNING, and noisily at DEBUG.
+
+### Issue reporting
+
+Please include:
+
+- Service version (first line of `docker logs fusion-service` after
+  start-up).
+- A full fusion cycle log line showing `FUSION [<pair>] ... scores=[...]`.
+- Your `config.yaml` with secrets replaced by `REDACTED`.
+- If the bug involves DB state: `sqlite3 data/fusion.db .schema` and the
+  row counts per table.
 
 ---
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
+
+This service is under the permissive MIT license. The upstream
+firmware projects it consumes have their own licenses (MIT or GPL-3.0 per
+the table in [Related Projects](#related-projects)); using them as
+*data sources* over MQTT does not create a derivative work, so the fusion
+service remains MIT-licensable even when paired with GPL-3.0 nodes.
+
+If you fork and bundle any GPL-3.0 source *into* this project, however,
+re-license accordingly.
