@@ -1,0 +1,27 @@
+# Secrets & local config
+.env
+config.yaml
+
+# Runtime data
+data/
+calibration/thresholds.json
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

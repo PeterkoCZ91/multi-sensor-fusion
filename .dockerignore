@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+calibration/
+config.yaml
+*.pyc

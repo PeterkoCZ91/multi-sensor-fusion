@@ -1,0 +1,15 @@
+[Unit]
+Description=Fusion Sensor Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={fusion_dir}
+ExecStart={fusion_dir}/.venv/bin/python fusion_service.py config.yaml
+Restart=always
+RestartSec=5
+Environment=TZ=Europe/Prague
+
+[Install]
+WantedBy=multi-user.target

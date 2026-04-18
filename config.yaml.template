@@ -1,0 +1,123 @@
+# ============================================================================
+# Fusion Service Configuration Template
+# ============================================================================
+# Copy this file to `config.yaml` and fill in your values, or run `install.py`
+# for an interactive wizard that writes it for you.
+#
+# Zone names (living, hallway, bedroom) are arbitrary labels — use whatever
+# makes sense to you. IDs like `ld2412_<room>`, `csi_<room>` must match the
+# device IDs configured on your physical sensors (MQTT client_id / ESPHome
+# `name:`).
+# ============================================================================
+
+# --- Telegram notifications (optional) -------------------------------------
+# Register a bot with @BotFather and get your chat_id from @userinfobot.
+# telegram:
+#   token: "YOUR_BOT_TOKEN"            # or env TELEGRAM_TOKEN
+#   chat_id: "YOUR_CHAT_ID"            # or env TELEGRAM_CHAT_ID
+#   cooldown_s: 30                     # min seconds between messages
+
+# --- MQTT broker -----------------------------------------------------------
+mqtt:
+  host: "mqtt.local"                   # e.g. "192.168.1.100" or "mosquitto.local"
+  port: 1883
+  # user: "fusion"                     # or env MQTT_USER
+  # password: "CHANGE_ME"              # or env MQTT_PASSWORD  (prefer env!)
+
+# --- Sensor pairs ----------------------------------------------------------
+# Each pair represents one room/zone. All sensors are optional — a pair with
+# only CSI nodes works, as does LD2412-only. Fusion activates whatever is
+# available and degrades gracefully when a sensor goes offline.
+pairs:
+  - name: "living"                     # zone label, referenced in logs/MQTT
+    ld2412_id: "ld2412_living"         # LD2412 1D radar MQTT device ID (optional)
+    ld2450_id: "ld2450_living"         # LD2450 2D radar MQTT device ID (optional)
+    csi_ids: ["csi_living"]            # ESPectre CSI node ID(s); 1..N supported
+    # csi_zones:                        # only for multi-CSI setups (zone inference)
+    #   csi_living: "living"
+    #   csi_hallway: "hallway"
+    noise_diff_threshold: 0.3           # differential below this is noise
+    score_norm_max: 0.5                 # CSI score divisor for 0..1 normalization
+    transition_window_s: 5.0            # seconds for A→B transition detection
+    fusion_mode: "cross_validate"       # cross_validate | single | weighted_avg
+    confidence_threshold: 0.55          # threshold to enter PRESENT
+    exit_threshold: 0.20                # hysteresis: threshold to leave PRESENT
+    max_latency_ms: 2000                # stale data threshold
+    debounce_in_s: 1.0                  # seconds to confirm presence
+    clearing_s: 20.0                    # seconds before declaring CLEAR
+    min_present_s: 30.0                 # anti-pingpong: min time in PRESENT
+    optional_sensors: true              # tolerate missing sensor feeds
+
+  - name: "hallway"
+    ld2412_id: "ld2412_hallway"
+    csi_ids: ["csi_hallway"]
+    fusion_mode: "cross_validate"
+    confidence_threshold: 0.50
+    exit_threshold: 0.20
+    clearing_s: 20.0
+    min_present_s: 10.0
+    optional_sensors: true
+
+  - name: "bedroom"
+    ld2412_id: "ld2412_bedroom"
+    csi_ids: ["csi_bedroom"]
+    fusion_mode: "cross_validate"
+    confidence_threshold: 0.45
+    exit_threshold: 0.20
+    clearing_s: 25.0
+    min_present_s: 60.0                 # longer for sleeping (avoid false CLEAR)
+    optional_sensors: true
+
+# --- SQLite database -------------------------------------------------------
+database:
+  path: "data/fusion.db"
+  max_size_mb: 500                      # oldest rows pruned above this size
+
+# --- Auto-discovery --------------------------------------------------------
+# Subscribe to esphome/discover/# for newly flashed CSI nodes. Discovered
+# nodes are auto-assigned to `default_pair`; move them via config afterwards.
+auto_discovery:
+  enabled: true
+  default_pair: "living"
+  csi_prefix: "csi_"
+
+# --- Home Assistant ground truth (optional) --------------------------------
+# Polls HA REST API for reference sensors (PIR, microwave, camera motion) to
+# label fusion events for offline analysis. These sensors can also feed into
+# the weighted-average fusion score when enabled via `fusion_inputs: true`.
+# home_assistant:
+#   url: "http://homeassistant.local:8123"
+#   token_env: "HA_TOKEN"               # env var name (never store token here)
+#   poll_interval_s: 2.0
+#   periodic_log_s: 30.0
+#   ground_truth_sensors:
+#     living:
+#       - entity_id: "binary_sensor.living_mw_occupancy"
+#         type: "mw_occupancy"          # Sonoff microwave / similar
+#         fusion_inputs: true
+#       - entity_id: "binary_sensor.living_pir"
+#         type: "pir_motion"
+#     bedroom:
+#       - entity_id: "binary_sensor.bedroom_mw_occupancy"
+#         type: "mw_occupancy"
+#     hallway:
+#       - entity_id: "binary_sensor.hallway_pir"
+#         type: "pir_motion"
+
+# --- Tapo camera PTZ (optional) --------------------------------------------
+# Drives Tapo PTZ presets from zone transitions. Non-blocking; failures are
+# retried with exponential backoff.
+# tapo_cameras:
+#   - ip: "192.168.1.50"
+#     user: "your-tapo-account@example.com"
+#     password: "YOUR_TAPO_PASSWORD"
+#     pair: "living"
+#     zone_presets:
+#       living: "1"
+#       hallway: "2"
+#     default_preset: "1"
+#     min_confidence: 0.6
+
+# --- Calibration persistence -----------------------------------------------
+# calibration:
+#   path: "calibration/thresholds.json"

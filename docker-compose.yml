@@ -1,0 +1,15 @@
+services:
+  fusion:
+    build: .
+    container_name: fusion-service
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./calibration:/app/calibration
+      - ./data:/app/data
+    environment:
+      - TZ=Europe/Prague
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-}
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
+      - HA_TOKEN=${HA_TOKEN:-}
