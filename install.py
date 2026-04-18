@@ -194,7 +194,8 @@ def scan_mqtt_sensors(host: str, port: int, user: str, password: str) -> dict:
                 dev = parts[1]
                 if "ld2412" in dev and dev not in found["ld2412"]:
                     found["ld2412"].append(dev)
-                elif "ld2450" in dev.lower() or "mw1_" in dev and dev not in found["ld2450"]:
+                # Also match legacy "mw1_*" naming used by early HLK-LD2450 builds
+                elif ("ld2450" in dev.lower() or "mw1_" in dev.lower()) and dev not in found["ld2450"]:
                     found["ld2450"].append(dev)
             elif parts[0] == "esphome" and len(parts) >= 3:
                 dev = parts[1]
