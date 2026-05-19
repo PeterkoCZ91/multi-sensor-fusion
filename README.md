@@ -1,5 +1,6 @@
 # :satellite_antenna: Multi-Sensor Presence Fusion :bulb:
 
+[![CI](https://github.com/PeterkoCZ91/multi-sensor-fusion/actions/workflows/ci.yml/badge.svg)](https://github.com/PeterkoCZ91/multi-sensor-fusion/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
